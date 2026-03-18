@@ -14,6 +14,14 @@ from playwright_stealth import Stealth
 CACHE_FILE = os.path.expanduser("~/.cache/tuxoff/index.json")
 CONFIG_FILE = os.path.expanduser("~/.config/tuxoff/config.json")
 
+DEBUG = False
+
+
+def dbg(msg):
+    if DEBUG:
+        print(f"[debug] {msg}")
+
+
 RUTRACKER_HOST = "rutracker.org"
 
 RUTRACKER_PLATFORMS = {
@@ -36,17 +44,28 @@ RUTRACKER_PLATFORMS = {
 
 
 def parse_args(argv):
+    global DEBUG
+
     if len(argv) < 2:
         return None, None, None
 
-    command = argv[1]
+    args = argv[1:]
+
+    if "--debug" in args:
+        DEBUG = True
+        args = [a for a in args if a != "--debug"]
+
+    if not args:
+        return None, None, None
+
+    command = args[0]
     if command.startswith("--"):
         return command, None, None
 
     game_name_parts = []
     platform = None
 
-    for arg in argv[2:]:
+    for arg in args[1:]:
         if arg.startswith("-p="):
             platform = arg[3:].lower().replace(" ", "").replace("/", "")
         else:
@@ -243,6 +262,7 @@ async def run_sync():
                     break
 
                 seen_urls.update(page_urls)
+                dbg(f"page {page_number}: {len(page_urls)} entries")
 
                 for row in rows:
                     link_el = await row.query_selector("td.coll-1 a:nth-child(2)")
@@ -315,11 +335,14 @@ async def search_rutracker(context, stealth, game_name, platform):
 
     for forum_id in forum_ids:
         url = f"https://{RUTRACKER_HOST}/forum/tracker.php?f={forum_id}&nm={game_name}"
+        dbg(f"fetching {url}")
         page = await context.new_page()
         await stealth.apply_stealth_async(page)
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            dbg(f"landed on {page.url}")
             rows = await page.query_selector_all("#tor-tbl tbody tr")
+            dbg(f"rows found: {len(rows)}")
             for row in rows:
                 title_el = await row.query_selector("td.t-title-col a.tLink")
                 if not title_el:
@@ -359,6 +382,9 @@ async def run_search(game_name, platform):
             if game_name.lower() in title.lower()
         }
 
+    dbg(f"cache entries: {len(index)}")
+    dbg(f"cache matches: {len(matches)}")
+
     rutracker_cookies = config.get("rutracker_cookies")
     if rutracker_cookies:
         await ensure_browsers()
@@ -373,6 +399,7 @@ async def run_search(game_name, platform):
             rt_results = await search_rutracker(
                 context, stealth, game_name, platform or "linux"
             )
+            dbg(f"rutracker results: {len(rt_results)}")
             matches.update(rt_results)
             await browser.close()
     else:
@@ -430,6 +457,7 @@ tuxoff — torrent search tool for jc141 and RuTracker
 COMMANDS
   tuxoff --sync              index all jc141 pages into local cache
   tuxoff --login             log in to RuTracker (opens browser window)
+  tuxoff --debug             enable verbose debug output (combine with any command)
   tuxoff --help              show this help
 
   tuxoff <game>              search by name (linux by default)

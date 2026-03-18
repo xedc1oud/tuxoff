@@ -57,20 +57,17 @@ cd tuxoff
 uv tool install .
 ```
 
-The `tuxoff` command will now be available globally in your terminal.
-
 ---
 
 ## Setup
 
-### Sync the jc141 index
+### Sync the index
 
 ```bash
 tuxoff --sync
 ```
 
-Crawls all jc141 pages and saves the index to `~/.cache/tuxoff/index.json`.  
-⏱ Takes a few minutes. Do this once, then re-run occasionally to pick up new releases.
+Crawls all jc141 pages and, if logged in, all RuTracker forums in parallel. Saves everything to `~/.cache/tuxoff/index.json`. Do this once, then re-run occasionally to pick up new releases.
 
 ### Log in to RuTracker
 
@@ -78,19 +75,67 @@ Crawls all jc141 pages and saves the index to `~/.cache/tuxoff/index.json`.
 tuxoff --login
 ```
 
-Opens a browser window — log in manually, then press **Enter** in the terminal to save the session to `~/.config/tuxoff/config.json`. Required for RuTracker search to work.
+Opens a browser window — log in manually, press **Enter** in the terminal. Session is saved to `~/.config/tuxoff/config.json` and reused for all future searches and syncs.
 
 ---
 
 ## Usage
 
-### Search for a game
+### Interactive catalog
+
+```bash
+tuxoff --catalog
+```
+
+Opens a full-screen TUI browser of the local index.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ tuxoff catalog                                   12:34:56   │
+├─────────────────┬──────────────────────────┬────────────────┤
+│  PLATFORMS      │  ENTRIES  342/1247        │  PREVIEW       │
+│                 │                           │                │
+│  ● All          │   [jc141] Supraland       │  Title         │
+│    Linux        │   [jc141] Hollow Knight   │  Supraland     │
+│    PS4          │ ✓ [jc141] Celeste         │                │
+│    Switch       │   [rutracker/ps4] GoW     │  Source        │
+│    ...          │   ...                     │  jc141         │
+│                 │                           │                │
+│                 │                           │  Platform      │
+│                 │                           │  Linux         │
+│                 │                           │                │
+│                 │                           │  Size          │
+│                 │                           │  2.1 GB        │
+│                 │                           │                │
+│                 │                           │  URL           │
+│                 │                           │  https://...   │
+├─────────────────┴──────────────────────────┴────────────────┤
+│  /: search    SPACE: select    ENTER: open    Q: quit        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Controls:**
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Navigate entries |
+| `SPACE` | Toggle selection |
+| `ENTER` | Open selected (or highlighted) in torrent client |
+| `/` | Focus search bar |
+| `ESC` | Clear search, return to list |
+| `Q` | Quit without opening |
+
+Click a platform in the sidebar to filter. Type in the search bar to filter by name. Select multiple entries with `SPACE`, then `ENTER` to open all at once.
+
+---
+
+### Search and open
 
 ```bash
 tuxoff <game-name>
 ```
 
-Searches the local jc141 cache and queries RuTracker live. Results appear in an interactive selection menu — use arrow keys to navigate, **Space** to toggle, **Enter** to confirm. Selected torrents are opened immediately in your torrent client via `xdg-open`.
+Searches the local jc141 cache and queries RuTracker live, then opens the catalog pre-filtered to matching results.
 
 ```bash
 tuxoff supraland
@@ -98,13 +143,11 @@ tuxoff "hollow knight"
 tuxoff witcher
 ```
 
-### Search by platform
+### Filter by platform
 
 ```bash
 tuxoff <game-name> -p=<platform>
 ```
-
-Limits the search to a specific platform on RuTracker.
 
 ```bash
 tuxoff zelda -p=switch
@@ -139,11 +182,12 @@ tuxoff "crash bandicoot" -p=ps1
 
 | Command | Description |
 |---|---|
-| `tuxoff --sync` | Index all jc141 pages into local cache |
+| `tuxoff --sync` | Sync jc141 + RuTracker index |
 | `tuxoff --login` | Log in to RuTracker and save session |
+| `tuxoff --catalog` | Open interactive catalog browser |
 | `tuxoff <game>` | Search by name (linux by default) |
 | `tuxoff <game> -p=<platform>` | Search on a specific platform |
-| `tuxoff --debug <...>` | Enable verbose output for any command |
+| `tuxoff --debug <command>` | Enable verbose output |
 | `tuxoff --help` | Show help |
 
 ---
@@ -152,7 +196,7 @@ tuxoff "crash bandicoot" -p=ps1
 
 | Path | Description |
 |---|---|
-| `~/.cache/tuxoff/index.json` | jc141 repack index |
+| `~/.cache/tuxoff/index.json` | Local repack index |
 | `~/.config/tuxoff/config.json` | RuTracker session cookies |
 
 ---

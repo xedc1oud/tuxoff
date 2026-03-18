@@ -7,8 +7,8 @@ import curses
 import asyncio
 import random
 import subprocess
-
 import httpx
+
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
@@ -275,9 +275,8 @@ def rt_parse_page(html, platform_key):
         title = a.get_text(strip=True)
         href = a.get("href", "")
         if href:
-            url = f"https://{RUTRACKER_HOST}/forum/{href}"
             results[f"[rutracker/{platform_key}] {title}"] = {
-                "url": url,
+                "url": f"https://{RUTRACKER_HOST}/forum/{href}",
                 "source": "rutracker",
                 "platform": platform_key,
             }
@@ -322,14 +321,17 @@ async def search_rutracker_forum(client, cookies, forum_id, game_name, platform_
     results = rt_parse_page(html, platform_key)
 
     extra_starts = rt_get_extra_starts(html)
-    dbg(f"forum {forum_id}: page 1 done, extra pages at starts {extra_starts}")
+    dbg(f"forum {forum_id}: extra pages at starts {extra_starts}")
 
     if extra_starts:
-        tasks = [
-            rt_fetch_page(client, cookies, forum_id, game_name, platform_key, start=s)
-            for s in extra_starts
-        ]
-        pages = await asyncio.gather(*tasks)
+        pages = await asyncio.gather(
+            *[
+                rt_fetch_page(
+                    client, cookies, forum_id, game_name, platform_key, start=s
+                )
+                for s in extra_starts
+            ]
+        )
         for page_html in pages:
             results.update(rt_parse_page(page_html, platform_key))
 
@@ -344,16 +346,15 @@ async def search_rutracker(game_name, platform, cookies):
         print(f"[!] Unknown platform '{platform}'. Available: {available}")
         return {}
 
-    forum_ids = RUTRACKER_PLATFORMS[key]
-
     async with httpx.AsyncClient(
         headers=HEADERS, timeout=30, follow_redirects=True
     ) as client:
-        tasks = [
-            search_rutracker_forum(client, cookies, fid, game_name, key)
-            for fid in forum_ids
-        ]
-        forum_results = await asyncio.gather(*tasks)
+        forum_results = await asyncio.gather(
+            *[
+                search_rutracker_forum(client, cookies, fid, game_name, key)
+                for fid in RUTRACKER_PLATFORMS[key]
+            ]
+        )
 
     results = {}
     for fr in forum_results:
@@ -369,11 +370,9 @@ async def run_login():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context(
-            user_agent=HEADERS["User-Agent"],
-        )
-
+        context = await browser.new_context(user_agent=HEADERS["User-Agent"])
         page = await context.new_page()
+
         print("[*] Opening RuTracker login page...")
         print("[*] Log in manually, then press ENTER here to save the session.")
         await page.goto(
@@ -381,7 +380,6 @@ async def run_login():
             wait_until="domcontentloaded",
             timeout=30000,
         )
-
         input("")
 
         storage = await context.storage_state()
@@ -389,7 +387,6 @@ async def run_login():
         config["rutracker_cookies"] = storage
         save_config(config)
         print("[+] Session saved to config.")
-
         await browser.close()
 
 
@@ -401,12 +398,11 @@ async def open_magnet_jc141(context, stealth, torrent_page_url):
     await stealth.apply_stealth_async(page)
     try:
         await page.goto(torrent_page_url, wait_until="domcontentloaded", timeout=30000)
-        magnet_el = await page.query_selector("a[href^='magnet:']")
-        if not magnet_el:
+        el = await page.query_selector("a[href^='magnet:']")
+        if not el:
             print(f"[X] No magnet link: {torrent_page_url}")
             return
-        magnet = await magnet_el.get_attribute("href")
-        subprocess.Popen(["xdg-open", magnet])
+        subprocess.Popen(["xdg-open", await el.get_attribute("href")])
         print(f"[*] Opened: {torrent_page_url}")
     finally:
         await page.close()
@@ -417,17 +413,43 @@ async def open_magnet_rutracker(context, stealth, torrent_page_url):
     await stealth.apply_stealth_async(page)
     try:
         await page.goto(torrent_page_url, wait_until="domcontentloaded", timeout=30000)
-        magnet_el = await page.query_selector("a.magnet-link")
-        if not magnet_el:
-            magnet_el = await page.query_selector("a[href^='magnet:']")
-        if not magnet_el:
+        el = await page.query_selector("a.magnet-link") or await page.query_selector(
+            "a[href^='magnet:']"
+        )
+        if not el:
             print(f"[X] No magnet link: {torrent_page_url}")
             return
-        magnet = await magnet_el.get_attribute("href")
-        subprocess.Popen(["xdg-open", magnet])
+        subprocess.Popen(["xdg-open", await el.get_attribute("href")])
         print(f"[*] Opened: {torrent_page_url}")
     finally:
         await page.close()
+
+
+async def open_chosen(chosen: list[tuple[str, dict]], storage) -> None:
+    await ensure_browsers()
+    stealth = Stealth()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        jc_context = await browser.new_context(user_agent=HEADERS["User-Agent"])
+        rt_context = None
+        if storage:
+            rt_context = await browser.new_context(
+                storage_state=storage,
+                user_agent=HEADERS["User-Agent"],
+            )
+
+        tasks = []
+        for title, meta in chosen:
+            if meta["source"] == "jc141":
+                tasks.append(open_magnet_jc141(jc_context, stealth, meta["url"]))
+            elif meta["source"] == "rutracker" and rt_context:
+                tasks.append(open_magnet_rutracker(rt_context, stealth, meta["url"]))
+            else:
+                print(f"[!] Cannot open (no RT session): {title}")
+
+        await asyncio.gather(*tasks)
+        await browser.close()
 
 
 # ── Search ────────────────────────────────────────────────────────────────────
@@ -439,17 +461,12 @@ async def run_search(game_name, platform):
 
     if platform:
         matches = {
-            title: meta
-            for title, meta in index.items()
-            if game_name.lower() in title.lower()
-            and meta.get("platform", "linux") == platform
+            t: m
+            for t, m in index.items()
+            if game_name.lower() in t.lower() and m.get("platform", "linux") == platform
         }
     else:
-        matches = {
-            title: meta
-            for title, meta in index.items()
-            if game_name.lower() in title.lower()
-        }
+        matches = {t: m for t, m in index.items() if game_name.lower() in t.lower()}
 
     dbg(f"cache entries: {len(index)}, cache matches: {len(matches)}")
 
@@ -468,37 +485,15 @@ async def run_search(game_name, platform):
         print(f"[-] No matches for '{game_name}'.")
         sys.exit(0)
 
-    titles = list(matches.keys())
-    chosen = curses.wrapper(interactive_select, titles)
+    from .catalog import run_catalog
+
+    chosen = run_catalog(index=matches)
 
     if not chosen:
         print("[-] Nothing selected.")
         sys.exit(0)
 
-    await ensure_browsers()
-    stealth = Stealth()
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-
-        jc141_context = await browser.new_context(user_agent=HEADERS["User-Agent"])
-        rt_context = None
-        if storage:
-            rt_context = await browser.new_context(
-                storage_state=storage,
-                user_agent=HEADERS["User-Agent"],
-            )
-
-        tasks = []
-        for title in chosen:
-            meta = matches[title]
-            if meta["source"] == "jc141":
-                tasks.append(open_magnet_jc141(jc141_context, stealth, meta["url"]))
-            elif meta["source"] == "rutracker" and rt_context:
-                tasks.append(open_magnet_rutracker(rt_context, stealth, meta["url"]))
-
-        await asyncio.gather(*tasks)
-        await browser.close()
+    await open_chosen(chosen, storage)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -513,34 +508,29 @@ def run():
 tuxoff — torrent search tool for jc141 and RuTracker
 
 COMMANDS
-  tuxoff --sync                index all jc141 pages into local cache
-  tuxoff --login               log in to RuTracker (opens browser window)
-  tuxoff --debug <command>     enable verbose debug output for any command
-  tuxoff --help                show this help
+  tuxoff --sync                  sync jc141 index into local cache
+  tuxoff --login                 log in to RuTracker (opens browser window)
+  tuxoff --catalog               open interactive catalog browser
+  tuxoff --debug <command>       enable verbose debug output for any command
+  tuxoff --help                  show this help
 
-  tuxoff <game>                search by name (linux by default)
-  tuxoff <game> -p=<platform>  search on a specific platform
+  tuxoff <game>                  search by name (linux by default)
+  tuxoff <game> -p=<platform>    search on a specific platform
 
 PLATFORMS
   linux      GNU/Linux Wine + Native (jc141 + RuTracker)
-  ps1        PlayStation 1
-  ps2        PlayStation 2
-  ps3        PlayStation 3
-  ps4        PlayStation 4
-  ps5        PlayStation 5
-  psp        PlayStation Portable
-  psvita     PlayStation Vita
-  xbox       Xbox (original)
-  xbox360    Xbox 360
-  wii        Wii / Wii U / GameCube
-  3ds        3DS / DS
-  switch     Nintendo Switch
-  dreamcast  Sega Dreamcast
-  other      Other platforms
+  ps1        PlayStation 1        ps2       PlayStation 2
+  ps3        PlayStation 3        ps4       PlayStation 4
+  ps5        PlayStation 5        psp       PlayStation Portable
+  psvita     PlayStation Vita     xbox      Xbox (original)
+  xbox360    Xbox 360             wii       Wii / Wii U / GameCube
+  3ds        3DS / DS             switch    Nintendo Switch
+  dreamcast  Sega Dreamcast       other     Other platforms
 
 EXAMPLES
   tuxoff --sync
   tuxoff --login
+  tuxoff --catalog
   tuxoff Supraland
   tuxoff "The Legend of Zelda" -p=switch
   tuxoff "God of War" -p=ps4
@@ -554,11 +544,21 @@ FILES
             asyncio.run(run_sync())
         elif command == "--login":
             asyncio.run(run_login())
+        elif command == "--catalog":
+            from .catalog import run_catalog
+
+            config = load_config()
+            storage = config.get("rutracker_cookies")
+            chosen = run_catalog()
+            if chosen:
+                asyncio.run(open_chosen(chosen, storage))
+            else:
+                print("[-] Nothing selected.")
         elif game_name:
             asyncio.run(run_search(game_name, platform))
         else:
             print(
-                "[!] Usage: tuxoff --help | --sync | --login | <game-name> [-p=<platform>]"
+                "[!] Usage: tuxoff --help | --sync | --login | --catalog | <game> [-p=<platform>]"
             )
             sys.exit(1)
 

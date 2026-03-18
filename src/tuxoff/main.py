@@ -8,19 +8,13 @@ import asyncio
 import random
 import subprocess
 
+import httpx
+from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
 CACHE_FILE = os.path.expanduser("~/.cache/tuxoff/index.json")
 CONFIG_FILE = os.path.expanduser("~/.config/tuxoff/config.json")
-
-DEBUG = False
-
-
-def dbg(msg):
-    if DEBUG:
-        print(f"[debug] {msg}")
-
 
 RUTRACKER_HOST = "rutracker.org"
 
@@ -41,6 +35,22 @@ RUTRACKER_PLATFORMS = {
     "dreamcast": [968],
     "other": [129],
 }
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+JC141_SEM = asyncio.Semaphore(8)
+RT_SEM = asyncio.Semaphore(5)
+
+DEBUG = False
+
+
+def dbg(msg):
+    if DEBUG:
+        print(f"[debug] {msg}")
 
 
 def parse_args(argv):
@@ -83,7 +93,7 @@ def load_cache():
     result = {}
     for title, meta in raw.items():
         if isinstance(meta, str):
-            result[title] = {"url": meta, "source": "jc141"}
+            result[title] = {"url": meta, "source": "jc141", "platform": "linux"}
         else:
             result[title] = meta
     return result
@@ -106,6 +116,14 @@ def save_config(data):
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def extract_cookies(storage_state):
+    cookies = {}
+    for c in storage_state.get("cookies", []):
+        if "rutracker" in c.get("domain", ""):
+            cookies[c["name"]] = c["value"]
+    return cookies
 
 
 def interactive_select(stdscr, items):
@@ -172,6 +190,212 @@ async def ensure_browsers():
             raise e
 
 
+# ── jc141 sync ────────────────────────────────────────────────────────────────
+
+
+def jc141_parse_page(html):
+    soup = BeautifulSoup(html, "lxml")
+    entries = {}
+    for row in soup.select("table.table-list tbody tr"):
+        links = row.select("td.coll-1 a")
+        if len(links) < 2:
+            continue
+        a = links[1]
+        title = a.get_text(strip=True)
+        href = a.get("href", "")
+        if href:
+            entries[f"[jc141] {title}"] = {
+                "url": "https://www.1337xx.to" + href,
+                "source": "jc141",
+                "platform": "linux",
+            }
+    return entries
+
+
+def jc141_get_last_page(html):
+    soup = BeautifulSoup(html, "lxml")
+    nums = []
+    for a in soup.select("ul.pagination li a"):
+        t = a.get_text(strip=True)
+        if t.isdigit():
+            nums.append(int(t))
+    return max(nums) if nums else 1
+
+
+async def jc141_fetch_page(client, page_num):
+    async with JC141_SEM:
+        url = (
+            f"https://www.1337xx.to/user/johncena141/{page_num}/"
+            if page_num > 1
+            else "https://www.1337xx.to/user/johncena141/"
+        )
+        await asyncio.sleep(random.uniform(0.1, 0.4))
+        resp = await client.get(url)
+        dbg(f"jc141 page {page_num}: {resp.status_code}")
+        return page_num, jc141_parse_page(resp.text)
+
+
+async def run_sync():
+    index = load_cache()
+
+    async with httpx.AsyncClient(
+        headers=HEADERS, timeout=30, follow_redirects=True
+    ) as client:
+        print("[~] Fetching jc141 page 1...")
+        resp = await client.get("https://www.1337xx.to/user/johncena141/")
+        first_page_entries = jc141_parse_page(resp.text)
+        last_page = jc141_get_last_page(resp.text)
+        dbg(f"jc141 total pages: {last_page}")
+        print(f"[*] jc141: {last_page} pages found, fetching all in parallel...")
+
+        tasks = [jc141_fetch_page(client, n) for n in range(2, last_page + 1)]
+        results = await asyncio.gather(*tasks)
+
+    all_entries = {**first_page_entries}
+    for _, page_entries in sorted(results, key=lambda x: x[0]):
+        all_entries.update(page_entries)
+
+    total_new = 0
+    for key, meta in all_entries.items():
+        if key not in index:
+            index[key] = meta
+            total_new += 1
+
+    save_cache(index)
+    print(f"[+] jc141 sync complete. {total_new} new entries. Total: {len(index)}.")
+
+
+# ── RuTracker search ──────────────────────────────────────────────────────────
+
+
+def rt_parse_page(html, platform_key):
+    soup = BeautifulSoup(html, "lxml")
+    results = {}
+    for a in soup.select("td.t-title-col a.tLink"):
+        title = a.get_text(strip=True)
+        href = a.get("href", "")
+        if href:
+            url = f"https://{RUTRACKER_HOST}/forum/{href}"
+            results[f"[rutracker/{platform_key}] {title}"] = {
+                "url": url,
+                "source": "rutracker",
+                "platform": platform_key,
+            }
+    return results
+
+
+def rt_get_extra_starts(html):
+    soup = BeautifulSoup(html, "lxml")
+    starts = set()
+    for a in soup.select("a[href*='start=']"):
+        href = a.get("href", "")
+        for part in href.split("&"):
+            if part.startswith("start="):
+                try:
+                    v = int(part.split("=")[1])
+                    if v > 0:
+                        starts.add(v)
+                except ValueError:
+                    pass
+    return sorted(starts)
+
+
+async def rt_fetch_page(client, cookies, forum_id, game_name, platform_key, start=0):
+    async with RT_SEM:
+        params = {"f": forum_id, "nm": game_name}
+        if start:
+            params["start"] = start
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+        resp = await client.get(
+            f"https://{RUTRACKER_HOST}/forum/tracker.php",
+            params=params,
+            cookies=cookies,
+        )
+        dbg(f"rutracker forum={forum_id} start={start}: {resp.status_code}")
+        return resp.text
+
+
+async def search_rutracker_forum(client, cookies, forum_id, game_name, platform_key):
+    html = await rt_fetch_page(
+        client, cookies, forum_id, game_name, platform_key, start=0
+    )
+    results = rt_parse_page(html, platform_key)
+
+    extra_starts = rt_get_extra_starts(html)
+    dbg(f"forum {forum_id}: page 1 done, extra pages at starts {extra_starts}")
+
+    if extra_starts:
+        tasks = [
+            rt_fetch_page(client, cookies, forum_id, game_name, platform_key, start=s)
+            for s in extra_starts
+        ]
+        pages = await asyncio.gather(*tasks)
+        for page_html in pages:
+            results.update(rt_parse_page(page_html, platform_key))
+
+    return results
+
+
+async def search_rutracker(game_name, platform, cookies):
+    key = platform or "linux"
+
+    if key not in RUTRACKER_PLATFORMS:
+        available = ", ".join(RUTRACKER_PLATFORMS.keys())
+        print(f"[!] Unknown platform '{platform}'. Available: {available}")
+        return {}
+
+    forum_ids = RUTRACKER_PLATFORMS[key]
+
+    async with httpx.AsyncClient(
+        headers=HEADERS, timeout=30, follow_redirects=True
+    ) as client:
+        tasks = [
+            search_rutracker_forum(client, cookies, fid, game_name, key)
+            for fid in forum_ids
+        ]
+        forum_results = await asyncio.gather(*tasks)
+
+    results = {}
+    for fr in forum_results:
+        results.update(fr)
+    return results
+
+
+# ── Login ─────────────────────────────────────────────────────────────────────
+
+
+async def run_login():
+    await ensure_browsers()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False)
+        context = await browser.new_context(
+            user_agent=HEADERS["User-Agent"],
+        )
+
+        page = await context.new_page()
+        print("[*] Opening RuTracker login page...")
+        print("[*] Log in manually, then press ENTER here to save the session.")
+        await page.goto(
+            f"https://{RUTRACKER_HOST}/forum/login.php",
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+
+        input("")
+
+        storage = await context.storage_state()
+        config = load_config()
+        config["rutracker_cookies"] = storage
+        save_config(config)
+        print("[+] Session saved to config.")
+
+        await browser.close()
+
+
+# ── Magnet opening ────────────────────────────────────────────────────────────
+
+
 async def open_magnet_jc141(context, stealth, torrent_page_url):
     page = await context.new_page()
     await stealth.apply_stealth_async(page)
@@ -206,162 +430,7 @@ async def open_magnet_rutracker(context, stealth, torrent_page_url):
         await page.close()
 
 
-async def run_sync():
-    await ensure_browsers()
-
-    stealth = Stealth()
-    index = load_cache()
-    total_new = 0
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        )
-
-        page = await context.new_page()
-        await stealth.apply_stealth_async(page)
-        await page.route(
-            "**/*.{png,jpg,jpeg,gif,css,woff,woff2,svg}", lambda route: route.abort()
-        )
-
-        page_number = 1
-        seen_urls = set()
-
-        while True:
-            url = (
-                f"https://www.1337xx.to/user/johncena141/{page_number}/"
-                if page_number > 1
-                else "https://www.1337xx.to/user/johncena141/"
-            )
-
-            print(f"[~] Syncing jc141 page {page_number}...")
-
-            try:
-                response = await page.goto(
-                    url, wait_until="domcontentloaded", timeout=30000
-                )
-                if response.status == 404:
-                    print("[!] End of jc141 pagination reached.")
-                    break
-
-                rows = await page.query_selector_all("table.table-list tbody tr")
-                if not rows:
-                    break
-
-                page_urls = set()
-                for row in rows:
-                    link_el = await row.query_selector("td.coll-1 a:nth-child(2)")
-                    if not link_el:
-                        continue
-                    href = await link_el.get_attribute("href")
-                    page_urls.add(href)
-
-                if page_urls and page_urls.issubset(seen_urls):
-                    print("[!] End of jc141 pagination reached.")
-                    break
-
-                seen_urls.update(page_urls)
-                dbg(f"page {page_number}: {len(page_urls)} entries")
-
-                for row in rows:
-                    link_el = await row.query_selector("td.coll-1 a:nth-child(2)")
-                    if not link_el:
-                        continue
-                    title = (await link_el.inner_text()).strip()
-                    href = await link_el.get_attribute("href")
-                    torrent_url = "https://www.1337xx.to" + href
-                    key = f"[jc141] {title}"
-                    if key not in index:
-                        index[key] = {
-                            "url": torrent_url,
-                            "source": "jc141",
-                            "platform": "linux",
-                        }
-                        total_new += 1
-
-                page_number += 1
-                await asyncio.sleep(random.uniform(0.5, 1.0))
-
-            except Exception as e:
-                print(f"[X] Critical error: {e}")
-                break
-
-        await browser.close()
-
-    save_cache(index)
-    print(f"[+] jc141 sync complete. {total_new} new entries. Total: {len(index)}.")
-
-
-async def run_login():
-    await ensure_browsers()
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        )
-
-        page = await context.new_page()
-        print("[*] Opening RuTracker login page...")
-        print("[*] Log in manually, then press ENTER here to save the session.")
-        await page.goto(
-            f"https://{RUTRACKER_HOST}/forum/login.php",
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
-
-        input("")
-
-        cookies = await context.storage_state()
-        config = load_config()
-        config["rutracker_cookies"] = cookies
-        save_config(config)
-        print("[+] Session saved to config.")
-
-        await browser.close()
-
-
-async def search_rutracker(context, stealth, game_name, platform):
-    results = {}
-    key = platform if platform else "linux"
-
-    if key not in RUTRACKER_PLATFORMS:
-        available = ", ".join(RUTRACKER_PLATFORMS.keys())
-        print(f"[!] Unknown platform '{platform}'. Available: {available}")
-        return results
-
-    forum_ids = RUTRACKER_PLATFORMS[key]
-
-    for forum_id in forum_ids:
-        url = f"https://{RUTRACKER_HOST}/forum/tracker.php?f={forum_id}&nm={game_name}"
-        dbg(f"fetching {url}")
-        page = await context.new_page()
-        await stealth.apply_stealth_async(page)
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            dbg(f"landed on {page.url}")
-            rows = await page.query_selector_all("#tor-tbl tbody tr")
-            dbg(f"rows found: {len(rows)}")
-            for row in rows:
-                title_el = await row.query_selector("td.t-title-col a.tLink")
-                if not title_el:
-                    continue
-                title = (await title_el.inner_text()).strip()
-                href = await title_el.get_attribute("href")
-                torrent_url = f"https://{RUTRACKER_HOST}/forum/{href}"
-                result_key = f"[rutracker/{key}] {title}"
-                results[result_key] = {
-                    "url": torrent_url,
-                    "source": "rutracker",
-                    "platform": key,
-                }
-        except Exception as e:
-            print(f"[X] RuTracker error (forum {forum_id}): {e}")
-        finally:
-            await page.close()
-
-    return results
+# ── Search ────────────────────────────────────────────────────────────────────
 
 
 async def run_search(game_name, platform):
@@ -382,26 +451,14 @@ async def run_search(game_name, platform):
             if game_name.lower() in title.lower()
         }
 
-    dbg(f"cache entries: {len(index)}")
-    dbg(f"cache matches: {len(matches)}")
+    dbg(f"cache entries: {len(index)}, cache matches: {len(matches)}")
 
-    rutracker_cookies = config.get("rutracker_cookies")
-    if rutracker_cookies:
-        await ensure_browsers()
-        stealth = Stealth()
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                storage_state=rutracker_cookies,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            )
-            rt_results = await search_rutracker(
-                context, stealth, game_name, platform or "linux"
-            )
-            dbg(f"rutracker results: {len(rt_results)}")
-            matches.update(rt_results)
-            await browser.close()
+    storage = config.get("rutracker_cookies")
+    if storage:
+        cookies = extract_cookies(storage)
+        rt_results = await search_rutracker(game_name, platform, cookies)
+        dbg(f"rutracker results: {len(rt_results)}")
+        matches.update(rt_results)
     else:
         print(
             "[!] RuTracker session not found. Run 'tuxoff --login' to enable RuTracker search."
@@ -424,14 +481,12 @@ async def run_search(game_name, platform):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
 
-        jc141_context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        )
+        jc141_context = await browser.new_context(user_agent=HEADERS["User-Agent"])
         rt_context = None
-        if rutracker_cookies:
+        if storage:
             rt_context = await browser.new_context(
-                storage_state=rutracker_cookies,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                storage_state=storage,
+                user_agent=HEADERS["User-Agent"],
             )
 
         tasks = []
@@ -446,6 +501,9 @@ async def run_search(game_name, platform):
         await browser.close()
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+
 def run():
     try:
         command, game_name, platform = parse_args(sys.argv)
@@ -455,13 +513,13 @@ def run():
 tuxoff — torrent search tool for jc141 and RuTracker
 
 COMMANDS
-  tuxoff --sync              index all jc141 pages into local cache
-  tuxoff --login             log in to RuTracker (opens browser window)
-  tuxoff --debug             enable verbose debug output (combine with any command)
-  tuxoff --help              show this help
+  tuxoff --sync                index all jc141 pages into local cache
+  tuxoff --login               log in to RuTracker (opens browser window)
+  tuxoff --debug <command>     enable verbose debug output for any command
+  tuxoff --help                show this help
 
-  tuxoff <game>              search by name (linux by default)
-  tuxoff <game> -p=<platform>  search on specific platform
+  tuxoff <game>                search by name (linux by default)
+  tuxoff <game> -p=<platform>  search on a specific platform
 
 PLATFORMS
   linux      GNU/Linux Wine + Native (jc141 + RuTracker)

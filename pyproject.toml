@@ -1,14 +1,22 @@
 [project]
 name = "tuxoff"
-version = "0.1.0"
-description = "easy parser for cracked games"
-readme = "README.md"
-requires-python = ">=3.13"
+version = "v1"
+description = "Terminal-based repack manager for Linux"
+requires-python = ">=3.10"
 dependencies = [
-    "playwright>=1.58.0",
+    "playwright>=1.40.0",
     "playwright-stealth>=2.0.2",
-    "setuptools>=82.0.1",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
 ]
+
+[tool.uv]
+package = true
 
 [project.scripts]
 tuxoff = "tuxoff.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

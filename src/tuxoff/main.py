@@ -7,8 +7,8 @@ import curses
 import asyncio
 import random
 import subprocess
-import httpx
 
+import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
@@ -485,9 +485,9 @@ async def run_search(game_name, platform):
         print(f"[-] No matches for '{game_name}'.")
         sys.exit(0)
 
-    from .catalog import run_catalog
+    from .catalog import run_catalog_async
 
-    chosen = run_catalog(index=matches)
+    chosen = await run_catalog_async(index=matches)
 
     if not chosen:
         print("[-] Nothing selected.")

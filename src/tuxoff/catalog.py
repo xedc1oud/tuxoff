@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -34,13 +36,12 @@ SOURCE_LABELS: dict[str, str] = {
 
 
 def _strip_prefix(title: str) -> str:
-    for part in (title.split("] ", 1),):
-        if len(part) == 2 and part[0].startswith("["):
-            return part[1]
+    if "] " in title:
+        return title.split("] ", 1)[1]
     return title
 
 
-def _wrap(text: str, width: int = 34) -> str:
+def _wrap(text: str, width: int = 32) -> str:
     words = text.split()
     lines: list[str] = []
     line = ""
@@ -88,8 +89,8 @@ class EntryItem(ListItem):
     def _make_text(self) -> str:
         mark = "✓ " if self._selected else "  "
         short = self.entry_title
-        if len(short) > 64:
-            short = short[:61] + "..."
+        if len(short) > 62:
+            short = short[:59] + "..."
         size = self.meta.get("size", "")
         return f"{mark}{short}  [{size}]" if size else f"{mark}{short}"
 
@@ -101,65 +102,169 @@ class EntryItem(ListItem):
 
 
 CSS = """
-Screen { background: $surface; }
-#layout { height: 1fr; }
+Screen {
+    background: #1a1b26;
+    layers: base;
+}
+
+Header {
+    background: #16161e;
+    color: #c0caf5;
+    height: 1;
+}
+
+Footer {
+    background: #16161e;
+    color: #565f89;
+}
+
+/* ── main layout ─────────────────────────────── */
+
+#layout {
+    width: 100%;
+    height: 1fr;
+    background: #1a1b26;
+}
+
+/* ── sidebar ──────────────────────────────────── */
 
 #sidebar {
     width: 22;
-    border-right: solid $primary-darken-2;
-    background: $surface-darken-1;
+    background: #16161e;
+    border-right: solid #292e42;
 }
+
 #sidebar-title {
-    background: $primary-darken-3;
-    color: $text;
+    background: #1f2335;
+    color: #bb9af7;
     text-align: center;
     height: 1;
     text-style: bold;
     padding: 0 1;
 }
-#platform-list > ListItem              { padding: 0 2; height: 1; }
-#platform-list > ListItem.active       { color: $success; text-style: bold; }
-#platform-list > ListItem.--highlight  { background: $primary; }
 
-#center { width: 1fr; }
+#platform-list {
+    background: #16161e;
+    height: 1fr;
+}
+
+#platform-list > ListItem {
+    padding: 0 1;
+    height: 1;
+    background: #16161e;
+    color: #a9b1d6;
+}
+
+#platform-list > ListItem.--highlight {
+    background: #292e42;
+    color: #c0caf5;
+}
+
+#platform-list > ListItem.active {
+    color: #9ece6a;
+    text-style: bold;
+}
+
+/* ── center ───────────────────────────────────── */
+
+#center {
+    width: 1fr;
+    background: #1a1b26;
+}
+
 #entries-header {
-    background: $primary-darken-3;
-    color: $text;
+    background: #1f2335;
+    color: #7aa2f7;
     padding: 0 1;
     height: 1;
     text-style: bold;
 }
-#entry-list > ListItem              { padding: 0 1; height: 1; }
-#entry-list > ListItem.--highlight  { background: $primary; }
-#entry-list > ListItem.selected-row { color: $success; }
+
+#entry-list {
+    background: #1a1b26;
+    height: 1fr;
+}
+
+#entry-list > ListItem {
+    padding: 0 1;
+    height: 1;
+    background: #1a1b26;
+    color: #a9b1d6;
+}
+
+#entry-list > ListItem.--highlight {
+    background: #292e42;
+    color: #c0caf5;
+}
+
+#entry-list > ListItem.sel {
+    color: #9ece6a;
+}
+
+/* ── preview ──────────────────────────────────── */
 
 #preview {
-    width: 38;
-    border-left: solid $primary-darken-2;
-    background: $surface-darken-1;
+    width: 36;
+    background: #16161e;
+    border-left: solid #292e42;
     padding: 0 2;
 }
+
 #preview-title {
-    background: $primary-darken-3;
-    color: $text;
+    background: #1f2335;
+    color: #bb9af7;
     text-align: center;
     height: 1;
     text-style: bold;
     margin-bottom: 1;
 }
-.plabel { color: $text-muted; text-style: bold; margin-top: 1; }
-.pvalue { color: $text; }
+
+#preview-body {
+    height: 1fr;
+    background: #16161e;
+}
+
+.plabel {
+    color: #565f89;
+    text-style: bold;
+    margin-top: 1;
+}
+
+.pvalue {
+    color: #c0caf5;
+}
+
+/* ── search bar ───────────────────────────────── */
 
 #search-bar {
     height: 3;
-    border-top: solid $primary-darken-2;
-    background: $surface-darken-2;
+    background: #16161e;
+    border-top: solid #292e42;
     padding: 0 1;
     align: left middle;
 }
-#search-input              { width: 1fr; border: solid $primary-darken-1; }
-#search-input:focus        { border: solid $primary; }
-#count-label               { color: $text-muted; padding: 0 2; width: auto; }
+
+#search-hint {
+    color: #7dcfff;
+    text-style: bold;
+}
+
+#search-input {
+    width: 1fr;
+    background: #1a1b26;
+    border: solid #292e42;
+    color: #c0caf5;
+}
+
+#search-input:focus {
+    border: solid #7aa2f7;
+}
+
+#count-label {
+    color: #565f89;
+    padding: 0 2;
+    width: auto;
+}
 """
 
 
@@ -181,6 +286,7 @@ class CatalogApp(App[list[tuple[str, dict]]]):
         super().__init__()
         self._index = index
         self._filtered: list[tuple[str, dict]] = []
+        self._selected: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -195,7 +301,7 @@ class CatalogApp(App[list[tuple[str, dict]]]):
                 yield Static("  PREVIEW", id="preview-title")
                 yield Vertical(id="preview-body")
         with Horizontal(id="search-bar"):
-            yield Label("  /  ")
+            yield Label("  /  ", id="search-hint")
             yield Input(placeholder="type to filter...", id="search-input")
             yield Label("", id="count-label")
         yield Footer()
@@ -203,6 +309,8 @@ class CatalogApp(App[list[tuple[str, dict]]]):
     def on_mount(self) -> None:
         self._build_platforms()
         self._refresh_entries()
+
+    # ── sidebar ───────────────────────────────────────────────────────────────
 
     def _build_platforms(self) -> None:
         lv = self.query_one("#platform-list", ListView)
@@ -225,33 +333,34 @@ class CatalogApp(App[list[tuple[str, dict]]]):
         self._active_platform = event.item.platform_key
         self._refresh_entries()
 
+    # ── entry list ────────────────────────────────────────────────────────────
+
     def _refresh_entries(self) -> None:
         query = self._search_query.lower()
         plat = self._active_platform
-        selected_titles = {
-            item.entry_title for item in self.query(EntryItem) if item.selected
-        }
 
-        self._filtered = [
-            (t, m)
-            for t, m in self._index.items()
-            if (plat == "all" or m.get("platform", "linux") == plat)
-            and (not query or query in t.lower())
-        ]
-        self._filtered.sort(key=lambda x: x[0].lower())
+        self._filtered = sorted(
+            [
+                (t, m)
+                for t, m in self._index.items()
+                if (plat == "all" or m.get("platform", "linux") == plat)
+                and (not query or query in t.lower())
+            ],
+            key=lambda x: x[0].lower(),
+        )
 
         lv = self.query_one("#entry-list", ListView)
         lv.clear()
         for title, meta in self._filtered:
             item = EntryItem(title, meta)
-            if title in selected_titles:
-                item.selected = True
-                item.add_class("selected-row")
+            if title in self._selected:
+                item._selected = True
+                item.add_class("sel")
             lv.append(item)
 
         total = len(self._index)
         shown = len(self._filtered)
-        sel = len(selected_titles)
+        sel = len(self._selected)
         sel_str = f"  {sel} selected  " if sel else ""
         self.query_one("#entries-header", Static).update(
             f"  ENTRIES  {shown}/{total}{sel_str}"
@@ -264,6 +373,8 @@ class CatalogApp(App[list[tuple[str, dict]]]):
         if isinstance(event.item, EntryItem):
             self._show_preview(event.item.entry_title, event.item.meta)
 
+    # ── preview ───────────────────────────────────────────────────────────────
+
     def _clear_preview(self) -> None:
         self.query_one("#preview-body", Vertical).remove_children()
 
@@ -271,21 +382,23 @@ class CatalogApp(App[list[tuple[str, dict]]]):
         body = self.query_one("#preview-body", Vertical)
         body.remove_children()
 
-        source = meta.get("source", "?")
-        platform = meta.get("platform", "?")
-        url = meta.get("url", "?")
-        size = meta.get("size", "")
-
         def row(label: str, value: str) -> None:
             body.mount(Label(label, classes="plabel"))
             body.mount(Label(_wrap(value), classes="pvalue"))
 
         row("Title", _strip_prefix(title))
-        row("Source", SOURCE_LABELS.get(source, source))
-        row("Platform", PLATFORM_LABELS.get(platform, platform))
-        if size:
-            row("Size", size)
-        row("URL", url)
+        row(
+            "Source", SOURCE_LABELS.get(meta.get("source", ""), meta.get("source", "?"))
+        )
+        row(
+            "Platform",
+            PLATFORM_LABELS.get(meta.get("platform", ""), meta.get("platform", "?")),
+        )
+        if meta.get("size"):
+            row("Size", meta["size"])
+        row("URL", meta.get("url", "?"))
+
+    # ── actions ───────────────────────────────────────────────────────────────
 
     def action_focus_search(self) -> None:
         self.query_one("#search-input", Input).focus()
@@ -302,14 +415,19 @@ class CatalogApp(App[list[tuple[str, dict]]]):
         item = lv.highlighted_child
         if not isinstance(item, EntryItem):
             return
-        item.selected = not item.selected
-        if item.selected:
-            item.add_class("selected-row")
+        t = item.entry_title
+        if t in self._selected:
+            self._selected.discard(t)
+            item._selected = False
+            item.remove_class("sel")
         else:
-            item.remove_class("selected-row")
-        sel = sum(1 for i in lv.query(EntryItem) if i.selected)
+            self._selected.add(t)
+            item._selected = True
+            item.add_class("sel")
+        item._refresh_label()
         total = len(self._index)
         shown = len(self._filtered)
+        sel = len(self._selected)
         sel_str = f"  {sel} selected  " if sel else ""
         self.query_one("#entries-header", Static).update(
             f"  ENTRIES  {shown}/{total}{sel_str}"
@@ -317,11 +435,13 @@ class CatalogApp(App[list[tuple[str, dict]]]):
 
     def action_confirm(self) -> None:
         lv = self.query_one("#entry-list", ListView)
-        chosen = [(i.entry_title, i.meta) for i in lv.query(EntryItem) if i.selected]
-        if not chosen:
+        if self._selected:
+            chosen = [(t, m) for t, m in self._index.items() if t in self._selected]
+        else:
             item = lv.highlighted_child
-            if isinstance(item, EntryItem):
-                chosen = [(item.entry_title, item.meta)]
+            chosen = (
+                [(item.entry_title, item.meta)] if isinstance(item, EntryItem) else []
+            )
         self.exit(chosen)
 
     def action_quit_empty(self) -> None:
@@ -333,10 +453,22 @@ class CatalogApp(App[list[tuple[str, dict]]]):
         self._refresh_entries()
 
 
+# ── public API ────────────────────────────────────────────────────────────────
+
+
+async def run_catalog_async(index: dict | None = None) -> list[tuple[str, dict]]:
+    if index is None:
+        index = load_cache()
+    if not index:
+        print("[!] Cache is empty. Run 'tuxoff --sync' first.")
+        return []
+    return await CatalogApp(index).run_async() or []
+
+
 def run_catalog(index: dict | None = None) -> list[tuple[str, dict]]:
     if index is None:
         index = load_cache()
     if not index:
         print("[!] Cache is empty. Run 'tuxoff --sync' first.")
         return []
-    return CatalogApp(index).run() or []
+    return asyncio.run(CatalogApp(index).run_async()) or []

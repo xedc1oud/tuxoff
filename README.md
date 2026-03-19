@@ -12,7 +12,7 @@
 **A terminal-based repack manager for Linux**
 
 ![Linux](https://img.shields.io/badge/Linux-only-FCC624?style=flat-square&logo=linux&logoColor=black)
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![uv](https://img.shields.io/badge/built_with-uv-DE5FE9?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 
@@ -29,7 +29,7 @@
 ## Requirements
 
 - **OS:** Linux (only)
-- **Python:** 3.10+
+- **Python:** 3.13+
 - **Package manager:** [`uv`](https://github.com/astral-sh/uv)
 
 ---
@@ -59,15 +59,25 @@ uv tool install .
 
 ---
 
+## Updating
+
+```bash
+cd tuxoff
+git pull
+uv tool install . --reinstall
+```
+
+---
+
 ## Setup
 
-### Sync the index
+### Sync the jc141 index
 
 ```bash
 tuxoff --sync
 ```
 
-Crawls all jc141 pages and, if logged in, all RuTracker forums in parallel. Saves everything to `~/.cache/tuxoff/index.json`. Do this once, then re-run occasionally to pick up new releases.
+Crawls all jc141 pages in parallel and saves the index to `~/.cache/tuxoff/index.json`. Do this once, then re-run occasionally to pick up new releases.
 
 ### Log in to RuTracker
 
@@ -75,7 +85,7 @@ Crawls all jc141 pages and, if logged in, all RuTracker forums in parallel. Save
 tuxoff --login
 ```
 
-Opens a browser window — log in manually, press **Enter** in the terminal. Session is saved to `~/.config/tuxoff/config.json` and reused for all future searches and syncs.
+Opens a browser window — log in manually, press **Enter** in the terminal. Session is saved to `~/.config/tuxoff/config.json` and reused for all future searches.
 
 ---
 
@@ -87,31 +97,27 @@ Opens a browser window — log in manually, press **Enter** in the terminal. Ses
 tuxoff --catalog
 ```
 
-Opens a full-screen TUI browser of the local index.
+Opens a full-screen TUI browser of the local jc141 index.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ tuxoff catalog                                   12:34:56   │
-├─────────────────┬──────────────────────────┬────────────────┤
-│  PLATFORMS      │  ENTRIES  342/1247        │  PREVIEW       │
-│                 │                           │                │
-│  ● All          │   [jc141] Supraland       │  Title         │
-│    Linux        │   [jc141] Hollow Knight   │  Supraland     │
-│    PS4          │ ✓ [jc141] Celeste         │                │
-│    Switch       │   [rutracker/ps4] GoW     │  Source        │
-│    ...          │   ...                     │  jc141         │
-│                 │                           │                │
-│                 │                           │  Platform      │
-│                 │                           │  Linux         │
-│                 │                           │                │
-│                 │                           │  Size          │
-│                 │                           │  2.1 GB        │
-│                 │                           │                │
-│                 │                           │  URL           │
-│                 │                           │  https://...   │
-├─────────────────┴──────────────────────────┴────────────────┤
-│  /: search    SPACE: select    ENTER: open    Q: quit        │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ tuxoff                                                12:34:56   │
+├──────────────────┬───────────────────────────┬───────────────────┤
+│  PLATFORMS       │  ENTRIES  100/1247         │  PREVIEW          │
+│                  │                            │                   │
+│  ● All (1247)    │   [jc141] Supraland        │  Title            │
+│    Linux (1247)  │   [jc141] Hollow Knight    │  Supraland        │
+│                  │ ✓ [jc141] Celeste          │                   │
+│                  │   [jc141] Witcher 3        │  Source           │
+│                  │   ...                      │  jc141            │
+│                  │                            │                   │
+│                  │  ← page 1 / 13  →          │  Platform         │
+│                  │                            │  Linux            │
+├──────────────────┴───────────────────────────┴───────────────────┤
+│  /  type to filter...                              100 results    │
+├──────────────────────────────────────────────────────────────────┤
+│  /: Search   SPACE/↵: Select   Ctrl+O: Open   ESC: Back   ^C: Quit│
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 **Controls:**
@@ -119,13 +125,30 @@ Opens a full-screen TUI browser of the local index.
 | Key | Action |
 |---|---|
 | `↑` / `↓` | Navigate entries |
-| `SPACE` | Toggle selection |
-| `ENTER` | Open selected (or highlighted) in torrent client |
+| `←` / `→` | Previous / next page |
+| `SPACE` or `Enter` | Toggle selection |
+| `Ctrl+O` | Open selected (or highlighted) in torrent client |
 | `/` | Focus search bar |
-| `ESC` | Clear search, return to list |
-| `Q` | Quit without opening |
+| `ESC` | Clear search / return to list / quit |
+| `Ctrl+C` | Quit without opening |
 
-Click a platform in the sidebar to filter. Type in the search bar to filter by name. Select multiple entries with `SPACE`, then `ENTER` to open all at once.
+The list is paginated at 100 entries per page for instant rendering regardless of index size. Select multiple entries with `SPACE`, then `Ctrl+O` to open all at once.
+
+---
+
+### Browse by platform
+
+```bash
+tuxoff -p=<platform>
+```
+
+Fetches the full RuTracker listing for a platform live and opens it in the catalog. Requires a RuTracker session (`tuxoff --login`).
+
+```bash
+tuxoff -p=switch
+tuxoff -p=ps4
+tuxoff -p=ps3
+```
 
 ---
 
@@ -143,7 +166,7 @@ tuxoff "hollow knight"
 tuxoff witcher
 ```
 
-### Filter by platform
+### Search by platform
 
 ```bash
 tuxoff <game-name> -p=<platform>
@@ -155,6 +178,16 @@ tuxoff "god of war" -p=ps4
 tuxoff halo -p=xbox360
 tuxoff "crash bandicoot" -p=ps1
 ```
+
+### Search without the catalog TUI
+
+```bash
+tuxoff <game-name> --no-catalog
+```
+
+Falls back to a simple curses menu instead of the full TUI. Useful on minimal setups or if you prefer a faster selection flow.
+
+---
 
 **Available platforms:**
 
@@ -182,11 +215,13 @@ tuxoff "crash bandicoot" -p=ps1
 
 | Command | Description |
 |---|---|
-| `tuxoff --sync` | Sync jc141 + RuTracker index |
+| `tuxoff --sync` | Index all jc141 pages into local cache |
 | `tuxoff --login` | Log in to RuTracker and save session |
 | `tuxoff --catalog` | Open interactive catalog browser |
+| `tuxoff -p=<platform>` | Browse all RuTracker entries for a platform |
 | `tuxoff <game>` | Search by name (linux by default) |
 | `tuxoff <game> -p=<platform>` | Search on a specific platform |
+| `tuxoff <game> --no-catalog` | Search with simple curses menu |
 | `tuxoff --debug <command>` | Enable verbose output |
 | `tuxoff --help` | Show help |
 
@@ -196,7 +231,7 @@ tuxoff "crash bandicoot" -p=ps1
 
 | Path | Description |
 |---|---|
-| `~/.cache/tuxoff/index.json` | Local repack index |
+| `~/.cache/tuxoff/index.json` | Local jc141 repack index |
 | `~/.config/tuxoff/config.json` | RuTracker session cookies |
 
 ---

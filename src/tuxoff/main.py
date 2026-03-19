@@ -44,8 +44,8 @@ HEADERS = {
 
 JC141_SEM = asyncio.Semaphore(8)
 RT_SEM = asyncio.Semaphore(5)
-
 DEBUG = False
+NO_CATALOG = False
 
 
 def dbg(msg):
@@ -53,8 +53,11 @@ def dbg(msg):
         print(f"[debug] {msg}")
 
 
+# ── args ──────────────────────────────────────────────────────────────────────
+
+
 def parse_args(argv):
-    global DEBUG
+    global DEBUG, NO_CATALOG
 
     if len(argv) < 2:
         return None, None, None
@@ -65,6 +68,10 @@ def parse_args(argv):
         DEBUG = True
         args = [a for a in args if a != "--debug"]
 
+    if "--no-catalog" in args:
+        NO_CATALOG = True
+        args = [a for a in args if a != "--no-catalog"]
+
     if not args:
         return None, None, None
 
@@ -72,17 +79,27 @@ def parse_args(argv):
     if command.startswith("--"):
         return command, None, None
 
+    # tuxoff -p=switch  →  open catalog filtered to that platform
+    if command.startswith("-p="):
+        platform = command[3:].lower().replace(" ", "").replace("/", "")
+        return "--platform-catalog", None, platform
+
     game_name_parts = []
     platform = None
 
     for arg in args[1:]:
         if arg.startswith("-p="):
             platform = arg[3:].lower().replace(" ", "").replace("/", "")
+        elif arg.startswith("-"):
+            pass  # skip unknown flags silently
         else:
             game_name_parts.append(arg)
 
     game_name = " ".join([command] + game_name_parts)
     return None, game_name, platform
+
+
+# ── cache / config ────────────────────────────────────────────────────────────
 
 
 def load_cache():
@@ -126,51 +143,53 @@ def extract_cookies(storage_state):
     return cookies
 
 
-def interactive_select(stdscr, items):
-    curses.curs_set(0)
-    curses.start_color()
-    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+# ── curses fallback select ────────────────────────────────────────────────────
 
-    selected = [False] * len(items)
-    cursor = 0
 
-    while True:
-        stdscr.clear()
-        height, width = stdscr.getmaxyx()
-        stdscr.addstr(
-            0, 0, "Select torrents to open  [SPACE toggle, ENTER confirm, Q quit]"
-        )
-        stdscr.addstr(1, 0, "─" * (width - 1))
+def curses_select(items):
+    def _inner(stdscr):
+        curses.curs_set(0)
+        curses.start_color()
+        curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        selected = [False] * len(items)
+        cursor = 0
+        while True:
+            stdscr.clear()
+            height, width = stdscr.getmaxyx()
+            stdscr.addstr(0, 0, "SPACE toggle  ENTER confirm  Q quit")
+            stdscr.addstr(1, 0, "─" * (width - 1))
+            visible_start = max(0, cursor - (height - 4))
+            for i, item in enumerate(items[visible_start:], start=visible_start):
+                row = i - visible_start + 2
+                if row >= height - 1:
+                    break
+                mark = "✓" if selected[i] else " "
+                line = f"  [{mark}] {item}"
+                if len(line) > width - 1:
+                    line = line[: width - 4] + "..."
+                if i == cursor:
+                    stdscr.attron(curses.color_pair(1))
+                    stdscr.addstr(row, 0, line.ljust(width - 1))
+                    stdscr.attroff(curses.color_pair(1))
+                else:
+                    stdscr.addstr(row, 0, line)
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == curses.KEY_UP and cursor > 0:
+                cursor -= 1
+            elif key == curses.KEY_DOWN and cursor < len(items) - 1:
+                cursor += 1
+            elif key == ord(" "):
+                selected[cursor] = not selected[cursor]
+            elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
+                return [items[i] for i, s in enumerate(selected) if s]
+            elif key in (ord("q"), ord("Q")):
+                return []
 
-        visible_start = max(0, cursor - (height - 4))
-        for i, item in enumerate(items[visible_start:], start=visible_start):
-            row = i - visible_start + 2
-            if row >= height - 1:
-                break
-            mark = "✓" if selected[i] else " "
-            line = f"  [{mark}] {item}"
-            if len(line) > width - 1:
-                line = line[: width - 4] + "..."
-            if i == cursor:
-                stdscr.attron(curses.color_pair(1))
-                stdscr.addstr(row, 0, line.ljust(width - 1))
-                stdscr.attroff(curses.color_pair(1))
-            else:
-                stdscr.addstr(row, 0, line)
+    return curses.wrapper(_inner)
 
-        stdscr.refresh()
-        key = stdscr.getch()
 
-        if key == curses.KEY_UP and cursor > 0:
-            cursor -= 1
-        elif key == curses.KEY_DOWN and cursor < len(items) - 1:
-            cursor += 1
-        elif key == ord(" "):
-            selected[cursor] = not selected[cursor]
-        elif key in (curses.KEY_ENTER, ord("\n"), ord("\r")):
-            return [items[i] for i, s in enumerate(selected) if s]
-        elif key in (ord("q"), ord("Q")):
-            return []
+# ── browsers ──────────────────────────────────────────────────────────────────
 
 
 async def ensure_browsers():
@@ -179,9 +198,7 @@ async def ensure_browsers():
             await p.chromium.launch(headless=True)
     except Exception as e:
         if "Executable doesn't exist" in str(e):
-            print(
-                "[!] Browsers not found. Starting installation (it will take a couple of minutes)..."
-            )
+            print("[!] Browsers not found. Starting installation...")
             subprocess.run(
                 [sys.executable, "-m", "playwright", "install", "chromium"], check=True
             )
@@ -215,11 +232,17 @@ def jc141_parse_page(html):
 def jc141_get_last_page(html):
     soup = BeautifulSoup(html, "lxml")
     nums = []
-    for a in soup.select("ul.pagination li a"):
-        t = a.get_text(strip=True)
-        if t.isdigit():
-            nums.append(int(t))
-    return max(nums) if nums else 1
+    for sel in ["ul.pagination li a", ".pagination a", "div.pagination a"]:
+        for a in soup.select(sel):
+            t = a.get_text(strip=True)
+            if t.isdigit():
+                nums.append(int(t))
+        if nums:
+            dbg(f"pagination selector matched: {sel!r}, max={max(nums)}")
+            break
+    if not nums:
+        dbg("pagination: no selector matched, fallback to sequential scan")
+    return max(nums) if nums else None
 
 
 async def jc141_fetch_page(client, page_num):
@@ -230,13 +253,18 @@ async def jc141_fetch_page(client, page_num):
             else "https://www.1337xx.to/user/johncena141/"
         )
         await asyncio.sleep(random.uniform(0.1, 0.4))
-        resp = await client.get(url)
-        dbg(f"jc141 page {page_num}: {resp.status_code}")
-        return page_num, jc141_parse_page(resp.text)
+        try:
+            resp = await client.get(url)
+            dbg(f"jc141 page {page_num}: {resp.status_code}")
+            return page_num, jc141_parse_page(resp.text)
+        except Exception as e:
+            dbg(f"jc141 page {page_num} error: {e}")
+            return page_num, {}
 
 
 async def run_sync():
     index = load_cache()
+    total_new = 0
 
     async with httpx.AsyncClient(
         headers=HEADERS, timeout=30, follow_redirects=True
@@ -245,17 +273,33 @@ async def run_sync():
         resp = await client.get("https://www.1337xx.to/user/johncena141/")
         first_page_entries = jc141_parse_page(resp.text)
         last_page = jc141_get_last_page(resp.text)
-        dbg(f"jc141 total pages: {last_page}")
-        print(f"[*] jc141: {last_page} pages found, fetching all in parallel...")
 
-        tasks = [jc141_fetch_page(client, n) for n in range(2, last_page + 1)]
-        results = await asyncio.gather(*tasks)
+        if last_page is not None:
+            print(f"[*] jc141: {last_page} pages found, fetching all in parallel...")
+            tasks = [jc141_fetch_page(client, n) for n in range(2, last_page + 1)]
+            results = await asyncio.gather(*tasks)
+            all_entries = {**first_page_entries}
+            for _, page_entries in sorted(results, key=lambda x: x[0]):
+                all_entries.update(page_entries)
+        else:
+            print("[*] jc141: pagination not detected, scanning sequentially...")
+            all_entries = {**first_page_entries}
+            seen: set[str] = set(first_page_entries.keys())
+            page_num = 2
+            while True:
+                _, page_entries = await jc141_fetch_page(client, page_num)
+                if not page_entries:
+                    break
+                new_keys = set(page_entries.keys()) - seen
+                if not new_keys:
+                    dbg(f"page {page_num} is duplicate, stopping")
+                    break
+                seen.update(page_entries.keys())
+                all_entries.update(page_entries)
+                print(f"[~] jc141 page {page_num}: {len(page_entries)} entries")
+                page_num += 1
+                await asyncio.sleep(random.uniform(0.3, 0.7))
 
-    all_entries = {**first_page_entries}
-    for _, page_entries in sorted(results, key=lambda x: x[0]):
-        all_entries.update(page_entries)
-
-    total_new = 0
     for key, meta in all_entries.items():
         if key not in index:
             index[key] = meta
@@ -287,8 +331,7 @@ def rt_get_extra_starts(html):
     soup = BeautifulSoup(html, "lxml")
     starts = set()
     for a in soup.select("a[href*='start=']"):
-        href = a.get("href", "")
-        for part in href.split("&"):
+        for part in a.get("href", "").split("&"):
             if part.startswith("start="):
                 try:
                     v = int(part.split("=")[1])
@@ -315,64 +358,52 @@ async def rt_fetch_page(client, cookies, forum_id, game_name, platform_key, star
 
 
 async def search_rutracker_forum(client, cookies, forum_id, game_name, platform_key):
-    html = await rt_fetch_page(
-        client, cookies, forum_id, game_name, platform_key, start=0
-    )
+    html = await rt_fetch_page(client, cookies, forum_id, game_name, platform_key)
     results = rt_parse_page(html, platform_key)
-
-    extra_starts = rt_get_extra_starts(html)
-    dbg(f"forum {forum_id}: extra pages at starts {extra_starts}")
-
-    if extra_starts:
+    extra = rt_get_extra_starts(html)
+    if extra:
         pages = await asyncio.gather(
             *[
-                rt_fetch_page(
-                    client, cookies, forum_id, game_name, platform_key, start=s
-                )
-                for s in extra_starts
+                rt_fetch_page(client, cookies, forum_id, game_name, platform_key, s)
+                for s in extra
             ]
         )
         for page_html in pages:
             results.update(rt_parse_page(page_html, platform_key))
-
     return results
 
 
 async def search_rutracker(game_name, platform, cookies):
     key = platform or "linux"
-
     if key not in RUTRACKER_PLATFORMS:
-        available = ", ".join(RUTRACKER_PLATFORMS.keys())
-        print(f"[!] Unknown platform '{platform}'. Available: {available}")
+        print(
+            f"[!] Unknown platform '{key}'. Available: {', '.join(RUTRACKER_PLATFORMS)}"
+        )
         return {}
-
     async with httpx.AsyncClient(
         headers=HEADERS, timeout=30, follow_redirects=True
     ) as client:
-        forum_results = await asyncio.gather(
+        results_list = await asyncio.gather(
             *[
                 search_rutracker_forum(client, cookies, fid, game_name, key)
                 for fid in RUTRACKER_PLATFORMS[key]
             ]
         )
+    out = {}
+    for r in results_list:
+        out.update(r)
+    return out
 
-    results = {}
-    for fr in forum_results:
-        results.update(fr)
-    return results
 
-
-# ── Login ─────────────────────────────────────────────────────────────────────
+# ── login ─────────────────────────────────────────────────────────────────────
 
 
 async def run_login():
     await ensure_browsers()
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(user_agent=HEADERS["User-Agent"])
         page = await context.new_page()
-
         print("[*] Opening RuTracker login page...")
         print("[*] Log in manually, then press ENTER here to save the session.")
         await page.goto(
@@ -381,7 +412,6 @@ async def run_login():
             timeout=30000,
         )
         input("")
-
         storage = await context.storage_state()
         config = load_config()
         config["rutracker_cookies"] = storage
@@ -390,72 +420,139 @@ async def run_login():
         await browser.close()
 
 
-# ── Magnet opening ────────────────────────────────────────────────────────────
+# ── fast magnet fetch via httpx ───────────────────────────────────────────────
 
 
-async def open_magnet_jc141(context, stealth, torrent_page_url):
-    page = await context.new_page()
-    await stealth.apply_stealth_async(page)
+async def _fetch_magnet_httpx(url: str, cookies: dict | None = None) -> str | None:
+    """Try to scrape the magnet link with httpx+bs4 — no browser needed."""
     try:
-        await page.goto(torrent_page_url, wait_until="domcontentloaded", timeout=30000)
-        el = await page.query_selector("a[href^='magnet:']")
+        async with httpx.AsyncClient(
+            headers=HEADERS,
+            cookies=cookies or {},
+            timeout=15,
+            follow_redirects=True,
+        ) as client:
+            resp = await client.get(url)
+        soup = BeautifulSoup(resp.text, "lxml")
+        # jc141 / generic
+        el = soup.select_one("a[href^='magnet:']")
         if not el:
-            print(f"[X] No magnet link: {torrent_page_url}")
-            return
-        subprocess.Popen(["xdg-open", await el.get_attribute("href")])
-        print(f"[*] Opened: {torrent_page_url}")
-    finally:
-        await page.close()
+            # rutracker
+            el = soup.select_one("a.magnet-link")
+        if el:
+            return el.get("href")
+    except Exception as e:
+        dbg(f"httpx magnet fetch failed for {url}: {e}")
+    return None
 
 
-async def open_magnet_rutracker(context, stealth, torrent_page_url):
-    page = await context.new_page()
-    await stealth.apply_stealth_async(page)
-    try:
-        await page.goto(torrent_page_url, wait_until="domcontentloaded", timeout=30000)
-        el = await page.query_selector("a.magnet-link") or await page.query_selector(
-            "a[href^='magnet:']"
-        )
-        if not el:
-            print(f"[X] No magnet link: {torrent_page_url}")
-            return
-        subprocess.Popen(["xdg-open", await el.get_attribute("href")])
-        print(f"[*] Opened: {torrent_page_url}")
-    finally:
-        await page.close()
+async def _fetch_magnet_playwright(url: str, storage=None) -> str | None:
+    """Playwright fallback — slower but handles JS-rendered pages."""
+    await ensure_browsers()
+    stealth = Stealth()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        ctx_kwargs = {"user_agent": HEADERS["User-Agent"]}
+        if storage:
+            ctx_kwargs["storage_state"] = storage
+        context = await browser.new_context(**ctx_kwargs)
+        page = await context.new_page()
+        await stealth.apply_stealth_async(page)
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            el = await page.query_selector(
+                "a[href^='magnet:']"
+            ) or await page.query_selector("a.magnet-link")
+            if el:
+                return await el.get_attribute("href")
+        except Exception as e:
+            dbg(f"playwright magnet fetch failed for {url}: {e}")
+        finally:
+            await page.close()
+            await browser.close()
+    return None
+
+
+async def _open_one(
+    title: str, meta: dict, rt_cookies: dict | None, rt_storage
+) -> None:
+    source = meta.get("source", "jc141")
+    url = meta["url"]
+
+    # fast path: httpx
+    cookies = rt_cookies if source == "rutracker" else None
+    magnet = await _fetch_magnet_httpx(url, cookies)
+
+    # slow fallback: playwright
+    if not magnet:
+        dbg(f"falling back to playwright for {url}")
+        storage = rt_storage if source == "rutracker" else None
+        magnet = await _fetch_magnet_playwright(url, storage)
+
+    if magnet:
+        subprocess.Popen(["xdg-open", magnet])
+        print(f"[*] Opened: {title[:60]}")
+    else:
+        print(f"[X] No magnet found: {url}")
 
 
 async def open_chosen(chosen: list[tuple[str, dict]], storage) -> None:
-    await ensure_browsers()
-    stealth = Stealth()
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        jc_context = await browser.new_context(user_agent=HEADERS["User-Agent"])
-        rt_context = None
-        if storage:
-            rt_context = await browser.new_context(
-                storage_state=storage,
-                user_agent=HEADERS["User-Agent"],
-            )
-
-        tasks = []
-        for title, meta in chosen:
-            if meta["source"] == "jc141":
-                tasks.append(open_magnet_jc141(jc_context, stealth, meta["url"]))
-            elif meta["source"] == "rutracker" and rt_context:
-                tasks.append(open_magnet_rutracker(rt_context, stealth, meta["url"]))
-            else:
-                print(f"[!] Cannot open (no RT session): {title}")
-
-        await asyncio.gather(*tasks)
-        await browser.close()
+    if not chosen:
+        return
+    rt_cookies = extract_cookies(storage) if storage else None
+    await asyncio.gather(
+        *[_open_one(title, meta, rt_cookies, storage) for title, meta in chosen]
+    )
 
 
-# ── Search ────────────────────────────────────────────────────────────────────
+# ── platform browse ──────────────────────────────────────────────────────────
 
 
-async def run_search(game_name, platform):
+async def run_platform_browse(platform: str) -> None:
+    """tuxoff -p=switch — show all RuTracker entries for a platform in catalog."""
+    config = load_config()
+    storage = config.get("rutracker_cookies")
+
+    # Start with cache entries for this platform
+    index = load_cache()
+    matches = {t: m for t, m in index.items() if m.get("platform", "linux") == platform}
+
+    if storage:
+        cookies = extract_cookies(storage)
+        print(f"[*] Fetching RuTracker listings for '{platform}'...")
+        # search with empty string = browse entire forum
+        rt_results = await search_rutracker("", platform, cookies)
+        print(f"[*] Found {len(rt_results)} entries.")
+        matches.update(rt_results)
+    else:
+        print(
+            "[!] No RuTracker session — showing cache only. Run 'tuxoff --login' to enable RT."
+        )
+
+    if not matches:
+        print(f"[-] No entries for platform '{platform}'.")
+        sys.exit(0)
+
+    if NO_CATALOG:
+        titles = list(matches.keys())
+        raw = curses_select(titles)
+        chosen = [(t, matches[t]) for t in raw]
+    else:
+        from .catalog import run_catalog_async
+
+        chosen = await run_catalog_async(index=matches)
+
+    if not chosen:
+        print("[-] Nothing selected.")
+        sys.exit(0)
+
+    await open_chosen(chosen, storage)
+
+
+# ── search ────────────────────────────────────────────────────────────────────
+
+
+async def run_search(game_name: str, platform: str | None) -> None:
     index = load_cache()
     config = load_config()
 
@@ -478,16 +575,21 @@ async def run_search(game_name, platform):
         matches.update(rt_results)
     else:
         print(
-            "[!] RuTracker session not found. Run 'tuxoff --login' to enable RuTracker search."
+            "[!] RuTracker session not found. Run 'tuxoff --login' to enable RT search."
         )
 
     if not matches:
         print(f"[-] No matches for '{game_name}'.")
         sys.exit(0)
 
-    from .catalog import run_catalog_async
+    if NO_CATALOG:
+        titles = list(matches.keys())
+        raw = curses_select(titles)
+        chosen = [(t, matches[t]) for t in raw]
+    else:
+        from .catalog import run_catalog_async
 
-    chosen = await run_catalog_async(index=matches)
+        chosen = await run_catalog_async(index=matches)
 
     if not chosen:
         print("[-] Nothing selected.")
@@ -496,7 +598,7 @@ async def run_search(game_name, platform):
     await open_chosen(chosen, storage)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── entry point ───────────────────────────────────────────────────────────────
 
 
 def run():
@@ -508,14 +610,16 @@ def run():
 tuxoff — torrent search tool for jc141 and RuTracker
 
 COMMANDS
-  tuxoff --sync                  sync jc141 index into local cache
-  tuxoff --login                 log in to RuTracker (opens browser window)
-  tuxoff --catalog               open interactive catalog browser
-  tuxoff --debug <command>       enable verbose debug output for any command
-  tuxoff --help                  show this help
+  tuxoff --sync                       sync jc141 index into local cache
+  tuxoff --login                      log in to RuTracker (opens browser window)
+  tuxoff --catalog                    open interactive catalog browser
+  tuxoff --debug <command>            enable verbose debug output
+  tuxoff --no-catalog <command>       use simple curses menu instead of TUI
+  tuxoff --help                       show this help
 
-  tuxoff <game>                  search by name (linux by default)
-  tuxoff <game> -p=<platform>    search on a specific platform
+  tuxoff <game>                       search by name (linux by default)
+  tuxoff <game> -p=<platform>         search on a specific platform
+  tuxoff -p=<platform>                browse catalog filtered to platform
 
 PLATFORMS
   linux      GNU/Linux Wine + Native (jc141 + RuTracker)
@@ -531,10 +635,11 @@ EXAMPLES
   tuxoff --sync
   tuxoff --login
   tuxoff --catalog
-  tuxoff Supraland
-  tuxoff "The Legend of Zelda" -p=switch
-  tuxoff "God of War" -p=ps4
-  tuxoff Halo -p=xbox360
+  tuxoff -p=switch
+  tuxoff supraland
+  tuxoff supraland --no-catalog
+  tuxoff "legend of zelda" -p=switch
+  tuxoff "god of war" -p=ps4
 
 FILES
   cache    ~/.cache/tuxoff/index.json
@@ -542,8 +647,10 @@ FILES
 """)
         elif command == "--sync":
             asyncio.run(run_sync())
+
         elif command == "--login":
             asyncio.run(run_login())
+
         elif command == "--catalog":
             from .catalog import run_catalog
 
@@ -554,11 +661,17 @@ FILES
                 asyncio.run(open_chosen(chosen, storage))
             else:
                 print("[-] Nothing selected.")
+
+        elif command == "--platform-catalog":
+            # tuxoff -p=switch  — fetch live from RuTracker + merge cache
+            asyncio.run(run_platform_browse(platform))
+
         elif game_name:
             asyncio.run(run_search(game_name, platform))
+
         else:
             print(
-                "[!] Usage: tuxoff --help | --sync | --login | --catalog | <game> [-p=<platform>]"
+                "[!] Usage: tuxoff --help | --sync | --login | --catalog | -p=<platform> | <game> [-p=<platform>]"
             )
             sys.exit(1)
 
